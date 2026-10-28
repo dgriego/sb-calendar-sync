@@ -82,6 +82,19 @@ sync. Dry runs don't count. To force the next hourly check to sync, delete
 `~/.config/outlook-sync/last-run`. Changes to `scheduleEveryDays` take effect
 on the next check, no need to reschedule.
 
+### Notifications
+
+| Key | Default | What it does |
+|---|---|---|
+| `notify` | `"always"` | After a scheduled sync, show a macOS notification: `"always"`, `"changes"` (only when SB events were added, moved or removed) or `"never"` |
+
+A failed scheduled sync always notifies, unless `notify` is `"never"`. Manual
+runs don't notify (you see the output), and hourly checks that skip because it
+already synced stay silent. Run `~/.local/bin/outlook-sync --test-notification`
+to check notifications show up. They come from Script Editor, so if nothing
+appears, allow notifications for Script Editor in System Settings →
+Notifications.
+
 Removing an SB event after "S" or coverage disappears takes two syncs, so with
 `3` that's up to 6 days.
 

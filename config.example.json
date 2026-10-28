@@ -14,5 +14,6 @@
   "daysBack": 7,
   "daysAhead": 21,
 
-  "scheduleEveryDays": 1
+  "scheduleEveryDays": 1,
+  "notify": "always"
 }

@@ -36,6 +36,7 @@ struct Config: Codable {
     var daysBack: Int?             // default 7
     var daysAhead: Int?            // default 21
     var scheduleEveryDays: Int?    // default 1, for scheduled runs
+    var notify: String?            // default "always": "always", "changes" or "never"
 }
 
 // Colors only in an interactive terminal, so the launchd log stays plain.
@@ -60,6 +61,7 @@ enum Default {
     static let daysBack = 7
     static let daysAhead = 21
     static let scheduleEveryDays = 1
+    static let notify = "always"
 }
 
 func log(_ message: String, _ color: Color? = nil) {
@@ -67,8 +69,23 @@ func log(_ message: String, _ color: Color? = nil) {
     print("\(paint("[\(ts)]", .dim)) \(color.map { paint(message, $0) } ?? message)")
 }
 
+/// Set for scheduled runs only: "always", "changes" or "never". Manual runs
+/// print to the terminal instead.
+var notifyMode: String? = nil
+
+/// Shows a macOS notification. The text is passed as arguments, never as
+/// AppleScript source, so event titles can't inject script.
+func notify(_ message: String, title: String = "outlook-sync") {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+    p.arguments = ["-e", "on run argv", "-e", "display notification (item 1 of argv) with title (item 2 of argv)",
+                   "-e", "end run", message, title]
+    do { try p.run(); p.waitUntilExit() } catch { log("warning: couldn't show a notification: \(error.localizedDescription)", .yellow) }
+}
+
 func fail(_ message: String) -> Never {
     log("ERROR: \(message)", .red)
+    if let mode = notifyMode, mode != "never" { notify(message, title: "outlook-sync failed") }
     exit(1)
 }
 
@@ -79,6 +96,7 @@ let dryRun = args.contains("--dry-run")
 let listOnly = args.contains("--list-calendars")
 let verbose = args.contains("--verbose")
 let scheduled = args.contains("--scheduled")   // passed by launchd, see install.sh
+if scheduled { notifyMode = Default.notify }
 var configPath = NSString(string: "~/.config/outlook-sync/config.json").expandingTildeInPath
 if let i = args.firstIndex(of: "--config"), i + 1 < args.count {
     configPath = NSString(string: args[i + 1]).expandingTildeInPath
@@ -94,6 +112,7 @@ let helpText = """
   outlook-sync --list-calendars        show calendar names + accounts (for the config)
   outlook-sync --show-config           show your settings, last sync and whether it's scheduled
   outlook-sync --config /path/to.json  use a different config file
+  outlook-sync --test-notification     show a sample notification (to check they're allowed)
   outlook-sync --help                  show this help
 
 \(paint("Scheduling", .bold)) (run from the repo folder)
@@ -113,13 +132,19 @@ let helpText = """
   \(paint("magenta", .magenta)) "S" or coverage gone, removed next run if still gone   \(paint("cyan", .cyan)) off day   \(paint("gray", .dim)) no "S"
 """
 
+if args.contains("--test-notification") {
+    notify("This is what you'll see after a scheduled sync.")
+    print("Sent a test notification. If nothing appeared, allow notifications for Script Editor in System Settings → Notifications.")
+    exit(0)
+}
+
 if args.contains("--help") || args.contains("-h") {
     print(helpText)
     exit(0)
 }
 
 // Stop on a mistyped option rather than doing a real sync (e.g. "--dryrun").
-let knownArgs: Set<String> = ["--dry-run", "--list-calendars", "--verbose", "--config", "--scheduled", "--show-config"]
+let knownArgs: Set<String> = ["--dry-run", "--list-calendars", "--verbose", "--config", "--scheduled", "--show-config", "--test-notification"]
 for (i, arg) in args.enumerated() where !knownArgs.contains(arg) && !(i > 0 && args[i - 1] == "--config") {
     print(paint("Unknown option: \(arg)", .red) + "\n")
     print(helpText)
@@ -159,6 +184,7 @@ if args.contains("--show-config") {
     row("daysBack", c.daysBack, default: Default.daysBack)
     row("daysAhead", c.daysAhead, default: Default.daysAhead)
     row("scheduleEveryDays", c.scheduleEveryDays, default: Default.scheduleEveryDays)
+    row("notify", c.notify, default: Default.notify)
 
     let lastRunPath = (configPath as NSString).deletingLastPathComponent + "/last-run"
     let shown = DateFormatter()
@@ -283,6 +309,10 @@ guard duration > 0, duration <= 24 * 3600 else { fail("durationHours must be mor
 guard (0...365).contains(daysBack) else { fail("daysBack must be between 0 and 365.") }
 guard (1...365).contains(daysAhead) else { fail("daysAhead must be between 1 and 365.") }
 guard (1...365).contains(cfg.scheduleEveryDays ?? Default.scheduleEveryDays) else { fail("scheduleEveryDays must be between 1 and 365.") }
+guard ["always", "changes", "never"].contains(cfg.notify ?? Default.notify) else {
+    fail("notify must be \"always\", \"changes\" or \"never\".")
+}
+if scheduled { notifyMode = cfg.notify ?? Default.notify }
 
 func findCalendar(name: String, account: String?, role: String) -> EKCalendar {
     let matches = store.calendars(for: .event).filter {
@@ -583,3 +613,11 @@ while day < windowEnd {
 }
 
 log("\(dryRun ? "Dry run done, nothing changed. Would have" : "Done:") \(created) created, \(updated) updated, \(removed) removed", .bold)
+
+if let mode = notifyMode, mode == "always" || (mode == "changes" && created + updated + removed > 0) {
+    let changes = [(created, "added"), (updated, "moved"), (removed, "removed")]
+        .filter { $0.0 > 0 }.map { "\($0.1.prefix(1).uppercased())\($0.1.dropFirst()) \($0.0)" }
+    let summary = changes.isEmpty ? "No changes" : changes.joined(separator: ", ")
+    let trigger = cfg.triggerTitle ?? Default.triggerTitle
+    notify("\(dryRun ? "Dry run: " : "")\(summary) · \(triggers.count) day\(triggers.count == 1 ? "" : "s") with \(trigger) in the next \(daysAhead) days")
+}
