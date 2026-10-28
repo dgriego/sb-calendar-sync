@@ -46,7 +46,7 @@ Forgot a command? Run `~/.local/bin/outlook-sync --help`.
 5. **Run it for real, then schedule it.**
    ```bash
    ~/.local/bin/outlook-sync
-   ./install.sh schedule          # every 30 min; INTERVAL=900 for 15 min
+   ./install.sh schedule          # once a day unless you change it (see below)
    ```
    When it runs on a schedule, macOS asks again whether to let *outlook-sync*
    access your calendars. Click Allow.
@@ -62,6 +62,28 @@ Forgot a command? Run `~/.local/bin/outlook-sync --help`.
 | `durationHours` | `8` | Length of the created event, up to 24 (`8.5` works too) |
 | `location` | none | Optional location to put on the created event |
 | `daysBack` / `daysAhead` | `7` / `21` | Which days to sync (0–365 back, 1–365 ahead) |
+
+### When it runs
+
+| Key | Default | What it does |
+|---|---|---|
+| `scheduleEveryDays` | `1` | Sync once every this many days (1–365) |
+
+It doesn't run at login or startup. Instead, macOS starts it at the top of
+every hour, and it checks `~/.config/outlook-sync/last-run`, the time of the
+last successful sync. If it already synced within `scheduleEveryDays` (counting
+calendar days, so `1` means once per day), it exits right away without
+touching your calendars. So it syncs at the first hourly check of the day, or
+the first one after the Mac wakes up. If a sync fails, the next hourly check
+tries again.
+
+Running `outlook-sync` by hand always syncs, and also counts as that day's
+sync. Dry runs don't count. To force the next hourly check to sync, delete
+`~/.config/outlook-sync/last-run`. Changes to `scheduleEveryDays` take effect
+on the next check, no need to reschedule.
+
+Removing an SB event after "S" or coverage disappears takes two syncs, so with
+`3` that's up to 6 days.
 
 Notes:
 - The day an "S" event belongs to is the day it starts on. If a day somehow has

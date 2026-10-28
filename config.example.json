@@ -12,5 +12,7 @@
   "location": "",
 
   "daysBack": 7,
-  "daysAhead": 21
+  "daysAhead": 21,
+
+  "scheduleEveryDays": 1
 }

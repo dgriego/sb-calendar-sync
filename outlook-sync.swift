@@ -35,6 +35,7 @@ struct Config: Codable {
     var location: String?
     var daysBack: Int?             // default 7
     var daysAhead: Int?            // default 21
+    var scheduleEveryDays: Int?    // default 1, for scheduled runs
 }
 
 // Colors only in an interactive terminal, so the launchd log stays plain.
@@ -65,6 +66,7 @@ let args = Array(CommandLine.arguments.dropFirst())
 let dryRun = args.contains("--dry-run")
 let listOnly = args.contains("--list-calendars")
 let verbose = args.contains("--verbose")
+let scheduled = args.contains("--scheduled")   // passed by launchd, see install.sh
 var configPath = NSString(string: "~/.config/outlook-sync/config.json").expandingTildeInPath
 if let i = args.firstIndex(of: "--config"), i + 1 < args.count {
     configPath = NSString(string: args[i + 1]).expandingTildeInPath
@@ -74,7 +76,7 @@ let helpText = """
 \(paint("outlook-sync", .bold)) — for every day with an "S" in Exchange, add an "SB" event to your Work calendar
 
 \(paint("Commands", .bold))
-  outlook-sync                         sync now
+  outlook-sync                         sync now (counts as today's scheduled sync)
   outlook-sync --dry-run               show what would change, change nothing
   outlook-sync --dry-run --verbose     also list every Exchange event and why it was used or skipped
   outlook-sync --list-calendars        show calendar names + accounts (for the config)
@@ -83,12 +85,13 @@ let helpText = """
 
 \(paint("Scheduling", .bold)) (run from the repo folder)
   ./install.sh build                   rebuild after changing the code
-  ./install.sh schedule                run every 30 min (INTERVAL=900 ./install.sh schedule for 15)
+  ./install.sh schedule                sync once every scheduleEveryDays (config), checked hourly
   ./install.sh unschedule              stop the scheduled runs
 
 \(paint("Files", .bold))
-  Config  ~/.config/outlook-sync/config.json
-  Log     ~/Library/Logs/outlook-sync.log
+  Config    ~/.config/outlook-sync/config.json
+  Log       ~/Library/Logs/outlook-sync.log
+  Last run  ~/.config/outlook-sync/last-run   (delete it to make the next scheduled check sync)
 
 \(paint("Colors", .bold))
   \(paint("green", .green)) added or already there   \(paint("yellow", .yellow)) moved   \(paint("red", .red)) removed
@@ -102,11 +105,33 @@ if args.contains("--help") || args.contains("-h") {
 }
 
 // Stop on a mistyped option rather than doing a real sync (e.g. "--dryrun").
-let knownArgs: Set<String> = ["--dry-run", "--list-calendars", "--verbose", "--config"]
+let knownArgs: Set<String> = ["--dry-run", "--list-calendars", "--verbose", "--config", "--scheduled"]
 for (i, arg) in args.enumerated() where !knownArgs.contains(arg) && !(i > 0 && args[i - 1] == "--config") {
     print(paint("Unknown option: \(arg)", .red) + "\n")
     print(helpText)
     exit(1)
+}
+
+// MARK: - Once-per-day check
+
+// launchd starts scheduled runs every hour. A scheduled run only syncs if the
+// last real sync was at least scheduleEveryDays calendar days ago; otherwise
+// it exits before touching the calendars. Manual runs always sync.
+let lastRunPath = (configPath as NSString).deletingLastPathComponent + "/last-run"
+
+func lastRunDate() -> Date? {
+    guard let text = try? String(contentsOfFile: lastRunPath, encoding: .utf8) else { return nil }
+    return ISO8601DateFormatter().date(from: text.trimmingCharacters(in: .whitespacesAndNewlines))
+}
+
+if scheduled, let last = lastRunDate() {
+    let json = FileManager.default.contents(atPath: configPath)
+        .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+    let everyDays = max((json?["scheduleEveryDays"] as? Int) ?? 1, 1)
+    let cal = Calendar.current
+    let elapsed = cal.dateComponents([.day], from: cal.startOfDay(for: last), to: cal.startOfDay(for: Date())).day ?? 0
+    // A last run in the future (clock changed) doesn't block syncing.
+    if elapsed >= 0 && elapsed < everyDays && last <= Date() { exit(0) }
 }
 
 // MARK: - Calendar access
@@ -193,6 +218,7 @@ guard !coverageTitle.isEmpty, coverageTitle != triggerTitle, coverageTitle != of
 guard duration > 0, duration <= 24 * 3600 else { fail("durationHours must be more than 0 and at most 24.") }
 guard (0...365).contains(daysBack) else { fail("daysBack must be between 0 and 365.") }
 guard (1...365).contains(daysAhead) else { fail("daysAhead must be between 1 and 365.") }
+guard (1...365).contains(cfg.scheduleEveryDays ?? 1) else { fail("scheduleEveryDays must be between 1 and 365.") }
 
 func findCalendar(name: String, account: String?, role: String) -> EKCalendar {
     let matches = store.calendars(for: .event).filter {
@@ -463,7 +489,15 @@ do {
         }
     }
 
-    if !dryRun { try store.commit() }
+    if !dryRun {
+        try store.commit()
+        // Only after a successful sync, so a failed run is retried at the next hourly check.
+        do {
+            try ISO8601DateFormatter().string(from: Date()).write(toFile: lastRunPath, atomically: true, encoding: .utf8)
+        } catch {
+            log("warning: couldn't save the last-run time to \(lastRunPath): \(error.localizedDescription)", .yellow)
+        }
+    }
 } catch {
     fail("Saving failed: \(error.localizedDescription)")
 }
