@@ -1,12 +1,15 @@
 // outlook-sync — for every day that has an "S" event in your Exchange
 // calendar, create an 8-hour event in your Apple "Work" calendar that starts
-// when "S" ends. Days without "S" get no event.
+// when "S" ends. A day only counts if it also has a "coverage" event. Days
+// without "S" or coverage, or with an "off" event, get no event.
 //
 // Usage:
 //   outlook-sync --list-calendars        show calendar names + accounts
 //   outlook-sync --dry-run               show what would change, change nothing
+//   outlook-sync --dry-run --verbose     also list every Exchange event and why it was used or skipped
 //   outlook-sync                         sync
 //   outlook-sync --config /path/to.json  use a different config file
+//   outlook-sync --help                  show all commands
 //
 // Each event the script creates is tagged with an "outlook-sync://" URL, so
 // it only updates or deletes its own events. If "S" moves, the Work event
@@ -25,20 +28,34 @@ struct Config: Codable {
     var targetCalendar: String
     var targetAccount: String?
     var triggerTitle: String?      // default "S"
+    var offTitle: String?          // default "off"
+    var coverageTitle: String?     // default "coverage"
     var eventTitle: String?        // default "SB"
     var durationHours: Double?     // default 8
     var location: String?
     var daysBack: Int?             // default 7
-    var daysAhead: Int?            // default 60
+    var daysAhead: Int?            // default 21
 }
 
-func log(_ message: String) {
+// Colors only in an interactive terminal, so the launchd log stays plain.
+// Set NO_COLOR to turn them off.
+let useColor = isatty(STDOUT_FILENO) != 0 && ProcessInfo.processInfo.environment["NO_COLOR"] == nil
+
+enum Color: String {
+    case red = "31", green = "32", yellow = "33", magenta = "35", cyan = "36", bold = "1", dim = "2"
+}
+
+func paint(_ text: String, _ color: Color) -> String {
+    useColor ? "\u{1B}[\(color.rawValue)m\(text)\u{1B}[0m" : text
+}
+
+func log(_ message: String, _ color: Color? = nil) {
     let ts = ISO8601DateFormatter().string(from: Date())
-    print("[\(ts)] \(message)")
+    print("\(paint("[\(ts)]", .dim)) \(color.map { paint(message, $0) } ?? message)")
 }
 
 func fail(_ message: String) -> Never {
-    log("ERROR: \(message)")
+    log("ERROR: \(message)", .red)
     exit(1)
 }
 
@@ -47,9 +64,49 @@ func fail(_ message: String) -> Never {
 let args = Array(CommandLine.arguments.dropFirst())
 let dryRun = args.contains("--dry-run")
 let listOnly = args.contains("--list-calendars")
+let verbose = args.contains("--verbose")
 var configPath = NSString(string: "~/.config/outlook-sync/config.json").expandingTildeInPath
 if let i = args.firstIndex(of: "--config"), i + 1 < args.count {
     configPath = NSString(string: args[i + 1]).expandingTildeInPath
+}
+
+let helpText = """
+\(paint("outlook-sync", .bold)) — for every day with an "S" in Exchange, add an "SB" event to your Work calendar
+
+\(paint("Commands", .bold))
+  outlook-sync                         sync now
+  outlook-sync --dry-run               show what would change, change nothing
+  outlook-sync --dry-run --verbose     also list every Exchange event and why it was used or skipped
+  outlook-sync --list-calendars        show calendar names + accounts (for the config)
+  outlook-sync --config /path/to.json  use a different config file
+  outlook-sync --help                  show this help
+
+\(paint("Scheduling", .bold)) (run from the repo folder)
+  ./install.sh build                   rebuild after changing the code
+  ./install.sh schedule                run every 30 min (INTERVAL=900 ./install.sh schedule for 15)
+  ./install.sh unschedule              stop the scheduled runs
+
+\(paint("Files", .bold))
+  Config  ~/.config/outlook-sync/config.json
+  Log     ~/Library/Logs/outlook-sync.log
+
+\(paint("Colors", .bold))
+  \(paint("green", .green)) added or already there   \(paint("yellow", .yellow)) moved   \(paint("red", .red)) removed
+  \(paint("yellow", .yellow)) also: "S" but no coverage yet, not added
+  \(paint("magenta", .magenta)) "S" or coverage gone, removed next run if still gone   \(paint("cyan", .cyan)) off day   \(paint("gray", .dim)) no "S"
+"""
+
+if args.contains("--help") || args.contains("-h") {
+    print(helpText)
+    exit(0)
+}
+
+// Stop on a mistyped option rather than doing a real sync (e.g. "--dryrun").
+let knownArgs: Set<String> = ["--dry-run", "--list-calendars", "--verbose", "--config"]
+for (i, arg) in args.enumerated() where !knownArgs.contains(arg) && !(i > 0 && args[i - 1] == "--config") {
+    print(paint("Unknown option: \(arg)", .red) + "\n")
+    print(helpText)
+    exit(1)
 }
 
 // MARK: - Calendar access
@@ -115,14 +172,24 @@ do {
     fail("Couldn't read config: \(error)")
 }
 
-let triggerTitle = (cfg.triggerTitle ?? "S").trimmingCharacters(in: .whitespaces).lowercased()
+func normalized(_ title: String?) -> String {
+    (title ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+}
+
+let triggerTitle = normalized(cfg.triggerTitle ?? "S")
+let offTitle = normalized(cfg.offTitle ?? "off")
+let coverageTitle = normalized(cfg.coverageTitle ?? "coverage")
 let eventTitle = cfg.eventTitle ?? "SB"
 let duration = (cfg.durationHours ?? 8) * 3600
 let eventLocation = cfg.location.flatMap { $0.isEmpty ? nil : $0 }
 let daysBack = cfg.daysBack ?? 7
-let daysAhead = cfg.daysAhead ?? 60
+let daysAhead = cfg.daysAhead ?? 21
 
 guard !triggerTitle.isEmpty else { fail("triggerTitle can't be empty.") }
+guard !offTitle.isEmpty, offTitle != triggerTitle else { fail("offTitle can't be empty or the same as triggerTitle.") }
+guard !coverageTitle.isEmpty, coverageTitle != triggerTitle, coverageTitle != offTitle else {
+    fail("coverageTitle can't be empty or the same as triggerTitle or offTitle.")
+}
 guard duration > 0, duration <= 24 * 3600 else { fail("durationHours must be more than 0 and at most 24.") }
 guard (0...365).contains(daysBack) else { fail("daysBack must be between 0 and 365.") }
 guard (1...365).contains(daysAhead) else { fail("daysAhead must be between 1 and 365.") }
@@ -151,6 +218,8 @@ guard target.allowsContentModifications else {
 }
 
 // MARK: - Helpers
+
+let cal = Calendar.current
 
 let markerScheme = "outlook-sync"
 
@@ -184,12 +253,41 @@ func isMarkedMissing(_ url: URL?) -> Bool {
     return c.queryItems?.contains(where: { $0.name == "missing" }) == true
 }
 
-func isTrigger(_ ev: EKEvent) -> Bool {
-    guard !ev.isAllDay, ev.status != .canceled else { return false }
+/// Why an event titled "S" doesn't count, or nil if it does.
+func triggerSkipReason(_ ev: EKEvent) -> String? {
+    if ev.isAllDay { return "all-day" }
+    if ev.status == .canceled { return "canceled" }
     // Only events you made yourself. Invites from others always have an
     // organizer who isn't you; your own events have no organizer or you.
-    if let organizer = ev.organizer, !organizer.isCurrentUser { return false }
-    return (ev.title ?? "").trimmingCharacters(in: .whitespaces).lowercased() == triggerTitle
+    if let organizer = ev.organizer, !organizer.isCurrentUser {
+        return "invite from \(organizer.name ?? "someone else")"
+    }
+    return nil
+}
+
+func isTrigger(_ ev: EKEvent) -> Bool {
+    normalized(ev.title) == triggerTitle && triggerSkipReason(ev) == nil
+}
+
+/// "off" events count whoever made them and can be all-day or span several days.
+func isOff(_ ev: EKEvent) -> Bool {
+    ev.status != .canceled && normalized(ev.title) == offTitle
+}
+
+/// "coverage" events count whoever made them and can be all-day or span several days.
+func isCoverage(_ ev: EKEvent) -> Bool {
+    ev.status != .canceled && normalized(ev.title) == coverageTitle
+}
+
+/// Every day an event touches, e.g. an all-day "off" from 11/12 to 11/15.
+func days(of ev: EKEvent) -> [String] {
+    var result: [String] = []
+    var d = cal.startOfDay(for: ev.startDate)
+    repeat {
+        result.append(dayFormatter.string(from: d))
+        d = cal.date(byAdding: .day, value: 1, to: d)!
+    } while d < ev.endDate
+    return result
 }
 
 /// Sets d to start at `start` and run for `duration`. Returns true if anything changed.
@@ -214,7 +312,6 @@ func describe(_ ev: EKEvent) -> String {
 
 // MARK: - Sync
 
-let cal = Calendar.current
 let now = Date()
 let windowStart = cal.date(byAdding: .day, value: -daysBack, to: cal.startOfDay(for: now))!
 let windowEnd = cal.date(byAdding: .day, value: daysAhead, to: cal.startOfDay(for: now))!
@@ -225,14 +322,49 @@ let srcEvents = store.events(matching: store.predicateForEvents(withStart: windo
 let dstEvents = store.events(matching: store.predicateForEvents(
     withStart: windowStart, end: windowEnd.addingTimeInterval(duration), calendars: [target]))
 
+var offDays = Set<String>()
+for ev in srcEvents where isOff(ev) { offDays.formUnion(days(of: ev)) }
+var coverageDays = Set<String>()
+for ev in srcEvents where isCoverage(ev) { coverageDays.formUnion(days(of: ev)) }
+
+if verbose {
+    log("Exchange events from \(dayFormatter.string(from: windowStart)) up to \(dayFormatter.string(from: windowEnd)):")
+    for ev in srcEvents.sorted(by: { $0.startDate < $1.startDate }) {
+        let day = dayFormatter.string(from: ev.startDate)
+        let verdict: String
+        if isOff(ev) {
+            verdict = "off day"
+        } else if isCoverage(ev) {
+            verdict = "coverage"
+        } else if normalized(ev.title) != triggerTitle {
+            verdict = "ignored (title isn't \"\(cfg.triggerTitle ?? "S")\")"
+        } else if let reason = triggerSkipReason(ev) {
+            verdict = "skipped: \(reason)"
+        } else if offDays.contains(day) {
+            verdict = "skipped: day is off"
+        } else if !coverageDays.contains(day) {
+            verdict = "skipped: no \"\(cfg.coverageTitle ?? "coverage")\" event that day"
+        } else {
+            verdict = "counts"
+        }
+        let color: Color = verdict == "counts" || verdict == "coverage" ? .green : verdict == "off day" ? .cyan
+            : verdict.hasPrefix("ignored") ? .dim : .yellow
+        print("  \(day)  \(describe(ev))\(ev.isAllDay ? " (all-day)" : "")  →  \(paint(verdict, color))")
+    }
+}
+
 // One "S" per day: the day is the day "S" starts on. If there are several,
-// use the earliest one.
+// use the earliest one. Days with an "off" event are skipped, and so are
+// days with no "coverage" event yet.
 var triggers: [String: EKEvent] = [:]
+var noCoverageDays = Set<String>()
 for ev in srcEvents where isTrigger(ev) {
     guard ev.startDate >= windowStart, ev.startDate < windowEnd else { continue }
     let day = dayFormatter.string(from: ev.startDate)
+    if offDays.contains(day) { continue }
+    if !coverageDays.contains(day) { noCoverageDays.insert(day); continue }
     if let existing = triggers[day] {
-        log("warning: more than one \"\(cfg.triggerTitle ?? "S")\" on \(day); using the earliest")
+        log("warning: more than one \"\(cfg.triggerTitle ?? "S")\" on \(day); using the earliest", .yellow)
         if ev.startDate < existing.startDate { triggers[day] = ev }
     } else {
         triggers[day] = ev
@@ -250,6 +382,17 @@ log("\(dryRun ? "DRY RUN — " : "")\(source.title) (\(source.source.title)) →
 
 var created = 0, updated = 0, removed = 0
 
+// What happened to each day, for the summary at the end.
+var outcome: [String: (text: String, color: Color)] = [:]
+func did(_ past: String, _ base: String) -> String { dryRun ? "would \(base)" : past }
+
+let timeOnly = DateFormatter()
+timeOnly.dateStyle = .none
+timeOnly.timeStyle = .short
+func span(_ ev: EKEvent) -> String {
+    "\(ev.title ?? "") \(timeOnly.string(from: ev.startDate))–\(timeOnly.string(from: ev.endDate))"
+}
+
 do {
     for day in triggers.keys.sorted() {
         let s = triggers[day]!
@@ -259,7 +402,10 @@ do {
             if changed {
                 if !dryRun { try store.save(d, span: .thisEvent, commit: false) }
                 updated += 1
-                log("update  \(day)  \(describe(d))")
+                log("update  \(day)  \(describe(d))", .yellow)
+                outcome[day] = ("\(did("updated", "update"))  \(span(d))", .yellow)
+            } else {
+                outcome[day] = ("already there  \(span(d))", .green)
             }
         } else {
             let d = EKEvent(eventStore: store)
@@ -268,8 +414,19 @@ do {
             _ = apply(start: s.endDate, timeZone: s.timeZone, to: d)
             if !dryRun { try store.save(d, span: .thisEvent, commit: false) }
             created += 1
-            log("create  \(day)  \(describe(d))")
+            log("create  \(day)  \(describe(d))", .green)
+            outcome[day] = ("\(did("added", "add"))  \(span(d))", .green)
         }
+    }
+
+    // Days marked "off": remove our event right away. Seeing "off" is a
+    // deliberate signal, not a sync hiccup, so there's no waiting.
+    let offRemovals = existing.filter { day, _ in offDays.contains(day) }
+    for (day, d) in offRemovals.sorted(by: { $0.key < $1.key }) {
+        log("remove  \(day)  \(describe(d))  (day is off)", .red)
+        outcome[day] = ("off — \(did("removed", "remove")) \(eventTitle)", .red)
+        if !dryRun { try store.remove(d, span: .thisEvent, commit: false) }
+        removed += 1
     }
 
     // Days where "S" disappeared: remove our event. Only for days inside the
@@ -277,25 +434,29 @@ do {
     // if Exchange returned nothing at all (e.g. not synced yet), so a sync
     // hiccup can't wipe the Work calendar.
     let stale = existing.filter { day, ev in
-        triggers[day] == nil
+        triggers[day] == nil && !offDays.contains(day)
             && dayFormatter.date(from: day).map { $0 >= windowStart && $0 < windowEnd } == true
     }
 
     if srcEvents.isEmpty && !stale.isEmpty {
-        log("Exchange returned no events; skipping deletions to be safe.")
+        log("Exchange returned no events; skipping deletions to be safe.", .yellow)
+        for day in stale.keys { outcome[day] = ("kept \(eventTitle) — Exchange returned nothing", .yellow) }
     } else {
         for d in duplicates {
-            log("remove  \(describe(d))  (duplicate)")
+            log("remove  \(describe(d))  (duplicate)", .red)
             if !dryRun { try store.remove(d, span: .thisEvent, commit: false) }
             removed += 1
         }
         for (day, d) in stale.sorted(by: { $0.key < $1.key }) {
+            let why = noCoverageDays.contains(day) ? "no \(cfg.coverageTitle ?? "coverage")" : "no \(cfg.triggerTitle ?? "S")"
             if isMarkedMissing(d.url) {
-                log("remove  \(day)  \(describe(d))")
+                log("remove  \(day)  \(describe(d))  (\(why))", .red)
+                outcome[day] = ("\(why) — \(did("removed", "remove")) \(eventTitle)", .red)
                 if !dryRun { try store.remove(d, span: .thisEvent, commit: false) }
                 removed += 1
             } else {
-                log("missing \(day)  \"\(cfg.triggerTitle ?? "S")\" not found; will remove next run if still missing")
+                log("missing \(day)  \(why); will remove next run if still missing", .magenta)
+                outcome[day] = ("\(why) — \(eventTitle) removed next run if still gone", .magenta)
                 d.url = markerURL(day: day, missing: true)
                 if !dryRun { try store.save(d, span: .thisEvent, commit: false) }
             }
@@ -307,4 +468,20 @@ do {
     fail("Saving failed: \(error.localizedDescription)")
 }
 
-log("Done: \(created) created, \(updated) updated, \(removed) removed")
+// Every day that was checked, oldest first.
+let weekday = DateFormatter()
+weekday.dateFormat = "EEE"
+print(paint("Days checked:", .bold))
+var day = windowStart
+while day < windowEnd {
+    let key = dayFormatter.string(from: day)
+    let (text, color) = outcome[key]
+        ?? (offDays.contains(key) ? ("off", .cyan)
+            : noCoverageDays.contains(key) ? ("\(cfg.triggerTitle ?? "S") but no \(cfg.coverageTitle ?? "coverage") yet — not added", .yellow)
+            : ("no \(cfg.triggerTitle ?? "S")", .dim))
+    let label = "\(weekday.string(from: day)) \(key)"
+    print("  \(cal.isDateInToday(day) ? paint(label, .bold) : label)  \(paint(text, color))")
+    day = cal.date(byAdding: .day, value: 1, to: day)!
+}
+
+log("\(dryRun ? "Dry run done, nothing changed. Would have" : "Done:") \(created) created, \(updated) updated, \(removed) removed", .bold)

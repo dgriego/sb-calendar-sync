@@ -5,10 +5,12 @@
   "targetAccount": "iCloud",
 
   "triggerTitle": "S",
+  "offTitle": "off",
+  "coverageTitle": "Coverage",
   "eventTitle": "SB",
   "durationHours": 8,
   "location": "",
 
   "daysBack": 7,
-  "daysAhead": 14
+  "daysAhead": 21
 }
