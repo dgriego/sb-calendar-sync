@@ -1,0 +1,14 @@
+{
+  "sourceCalendar": "Calendar",
+  "sourceAccount": "Exchange",
+  "targetCalendar": "Work",
+  "targetAccount": "iCloud",
+
+  "triggerTitle": "S",
+  "eventTitle": "SB",
+  "durationHours": 8,
+  "location": "",
+
+  "daysBack": 7,
+  "daysAhead": 14
+}

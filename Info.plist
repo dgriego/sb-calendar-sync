@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.daniel.outlook-sync</string>
+    <key>CFBundleName</key>
+    <string>outlook-sync</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>outlook-sync copies selected work events into a shareable calendar.</string>
+    <key>NSCalendarsUsageDescription</key>
+    <string>outlook-sync copies selected work events into a shareable calendar.</string>
+</dict>
+</plist>
