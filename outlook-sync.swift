@@ -50,6 +50,18 @@ func paint(_ text: String, _ color: Color) -> String {
     useColor ? "\u{1B}[\(color.rawValue)m\(text)\u{1B}[0m" : text
 }
 
+/// Used when a setting is left out of the config.
+enum Default {
+    static let triggerTitle = "S"
+    static let offTitle = "off"
+    static let coverageTitle = "coverage"
+    static let eventTitle = "SB"
+    static let durationHours = 8.0
+    static let daysBack = 7
+    static let daysAhead = 21
+    static let scheduleEveryDays = 1
+}
+
 func log(_ message: String, _ color: Color? = nil) {
     let ts = ISO8601DateFormatter().string(from: Date())
     print("\(paint("[\(ts)]", .dim)) \(color.map { paint(message, $0) } ?? message)")
@@ -80,6 +92,7 @@ let helpText = """
   outlook-sync --dry-run               show what would change, change nothing
   outlook-sync --dry-run --verbose     also list every Exchange event and why it was used or skipped
   outlook-sync --list-calendars        show calendar names + accounts (for the config)
+  outlook-sync --show-config           show your settings, last sync and whether it's scheduled
   outlook-sync --config /path/to.json  use a different config file
   outlook-sync --help                  show this help
 
@@ -87,6 +100,7 @@ let helpText = """
   ./install.sh build                   rebuild after changing the code
   ./install.sh schedule                sync once every scheduleEveryDays (config), checked hourly
   ./install.sh unschedule              stop the scheduled runs
+  ./install.sh reset-config            replace your config with the example (backs up the old one)
 
 \(paint("Files", .bold))
   Config    ~/.config/outlook-sync/config.json
@@ -105,11 +119,61 @@ if args.contains("--help") || args.contains("-h") {
 }
 
 // Stop on a mistyped option rather than doing a real sync (e.g. "--dryrun").
-let knownArgs: Set<String> = ["--dry-run", "--list-calendars", "--verbose", "--config", "--scheduled"]
+let knownArgs: Set<String> = ["--dry-run", "--list-calendars", "--verbose", "--config", "--scheduled", "--show-config"]
 for (i, arg) in args.enumerated() where !knownArgs.contains(arg) && !(i > 0 && args[i - 1] == "--config") {
     print(paint("Unknown option: \(arg)", .red) + "\n")
     print(helpText)
     exit(1)
+}
+
+// MARK: - Show config
+
+if args.contains("--show-config") {
+    guard let data = FileManager.default.contents(atPath: configPath) else {
+        fail("Config not found at \(configPath). Run ./install.sh build or ./install.sh reset-config.")
+    }
+    let c: Config
+    do { c = try JSONDecoder().decode(Config.self, from: data) } catch { fail("Couldn't read config: \(error)") }
+
+    func row(_ key: String, _ value: Any?, default fallback: Any? = nil) {
+        let name = key.padding(toLength: 20, withPad: " ", startingAt: 0)
+        if let value, "\(value)" != "" {
+            print("  \(name)\(value)")
+        } else if let fallback {
+            print("  \(name)\(fallback)  \(paint("(default)", .dim))")
+        } else {
+            print("  \(name)\(paint("(none)", .dim))")
+        }
+    }
+    print(paint("Config", .bold) + "  \(configPath)")
+    row("sourceCalendar", c.sourceCalendar)
+    row("sourceAccount", c.sourceAccount)
+    row("targetCalendar", c.targetCalendar)
+    row("targetAccount", c.targetAccount)
+    row("triggerTitle", c.triggerTitle, default: Default.triggerTitle)
+    row("coverageTitle", c.coverageTitle, default: Default.coverageTitle)
+    row("offTitle", c.offTitle, default: Default.offTitle)
+    row("eventTitle", c.eventTitle, default: Default.eventTitle)
+    row("durationHours", c.durationHours.map { $0 == $0.rounded() ? "\(Int($0))" : "\($0)" }, default: Int(Default.durationHours))
+    row("location", c.location)
+    row("daysBack", c.daysBack, default: Default.daysBack)
+    row("daysAhead", c.daysAhead, default: Default.daysAhead)
+    row("scheduleEveryDays", c.scheduleEveryDays, default: Default.scheduleEveryDays)
+
+    let lastRunPath = (configPath as NSString).deletingLastPathComponent + "/last-run"
+    let shown = DateFormatter()
+    shown.dateStyle = .medium
+    shown.timeStyle = .short
+    let last = (try? String(contentsOfFile: lastRunPath, encoding: .utf8))
+        .flatMap { ISO8601DateFormatter().date(from: $0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+    print("\n" + paint("Last sync", .bold) + "  \(last.map { shown.string(from: $0) } ?? "never")")
+
+    let agent = NSString(string: "~/Library/LaunchAgents/com.daniel.outlook-sync.plist").expandingTildeInPath
+    let days = c.scheduleEveryDays ?? Default.scheduleEveryDays
+    print(paint("Schedule", .bold) + "   " + (FileManager.default.fileExists(atPath: agent)
+        ? paint("on", .green) + " — once \(days == 1 ? "a day" : "every \(days) days"), checked hourly"
+        : paint("off", .yellow) + " — run ./install.sh schedule to turn it on"))
+    exit(0)
 }
 
 // MARK: - Once-per-day check
@@ -127,7 +191,7 @@ func lastRunDate() -> Date? {
 if scheduled, let last = lastRunDate() {
     let json = FileManager.default.contents(atPath: configPath)
         .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
-    let everyDays = max((json?["scheduleEveryDays"] as? Int) ?? 1, 1)
+    let everyDays = max((json?["scheduleEveryDays"] as? Int) ?? Default.scheduleEveryDays, 1)
     let cal = Calendar.current
     let elapsed = cal.dateComponents([.day], from: cal.startOfDay(for: last), to: cal.startOfDay(for: Date())).day ?? 0
     // A last run in the future (clock changed) doesn't block syncing.
@@ -201,14 +265,14 @@ func normalized(_ title: String?) -> String {
     (title ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 }
 
-let triggerTitle = normalized(cfg.triggerTitle ?? "S")
-let offTitle = normalized(cfg.offTitle ?? "off")
-let coverageTitle = normalized(cfg.coverageTitle ?? "coverage")
-let eventTitle = cfg.eventTitle ?? "SB"
-let duration = (cfg.durationHours ?? 8) * 3600
+let triggerTitle = normalized(cfg.triggerTitle ?? Default.triggerTitle)
+let offTitle = normalized(cfg.offTitle ?? Default.offTitle)
+let coverageTitle = normalized(cfg.coverageTitle ?? Default.coverageTitle)
+let eventTitle = cfg.eventTitle ?? Default.eventTitle
+let duration = (cfg.durationHours ?? Default.durationHours) * 3600
 let eventLocation = cfg.location.flatMap { $0.isEmpty ? nil : $0 }
-let daysBack = cfg.daysBack ?? 7
-let daysAhead = cfg.daysAhead ?? 21
+let daysBack = cfg.daysBack ?? Default.daysBack
+let daysAhead = cfg.daysAhead ?? Default.daysAhead
 
 guard !triggerTitle.isEmpty else { fail("triggerTitle can't be empty.") }
 guard !offTitle.isEmpty, offTitle != triggerTitle else { fail("offTitle can't be empty or the same as triggerTitle.") }
@@ -218,7 +282,7 @@ guard !coverageTitle.isEmpty, coverageTitle != triggerTitle, coverageTitle != of
 guard duration > 0, duration <= 24 * 3600 else { fail("durationHours must be more than 0 and at most 24.") }
 guard (0...365).contains(daysBack) else { fail("daysBack must be between 0 and 365.") }
 guard (1...365).contains(daysAhead) else { fail("daysAhead must be between 1 and 365.") }
-guard (1...365).contains(cfg.scheduleEveryDays ?? 1) else { fail("scheduleEveryDays must be between 1 and 365.") }
+guard (1...365).contains(cfg.scheduleEveryDays ?? Default.scheduleEveryDays) else { fail("scheduleEveryDays must be between 1 and 365.") }
 
 func findCalendar(name: String, account: String?, role: String) -> EKCalendar {
     let matches = store.calendars(for: .event).filter {
@@ -363,13 +427,13 @@ if verbose {
         } else if isCoverage(ev) {
             verdict = "coverage"
         } else if normalized(ev.title) != triggerTitle {
-            verdict = "ignored (title isn't \"\(cfg.triggerTitle ?? "S")\")"
+            verdict = "ignored (title isn't \"\(cfg.triggerTitle ?? Default.triggerTitle)\")"
         } else if let reason = triggerSkipReason(ev) {
             verdict = "skipped: \(reason)"
         } else if offDays.contains(day) {
             verdict = "skipped: day is off"
         } else if !coverageDays.contains(day) {
-            verdict = "skipped: no \"\(cfg.coverageTitle ?? "coverage")\" event that day"
+            verdict = "skipped: no \"\(cfg.coverageTitle ?? Default.coverageTitle)\" event that day"
         } else {
             verdict = "counts"
         }
@@ -390,7 +454,7 @@ for ev in srcEvents where isTrigger(ev) {
     if offDays.contains(day) { continue }
     if !coverageDays.contains(day) { noCoverageDays.insert(day); continue }
     if let existing = triggers[day] {
-        log("warning: more than one \"\(cfg.triggerTitle ?? "S")\" on \(day); using the earliest", .yellow)
+        log("warning: more than one \"\(cfg.triggerTitle ?? Default.triggerTitle)\" on \(day); using the earliest", .yellow)
         if ev.startDate < existing.startDate { triggers[day] = ev }
     } else {
         triggers[day] = ev
@@ -404,7 +468,7 @@ for ev in dstEvents {
     if existing[day] != nil { duplicates.append(ev) } else { existing[day] = ev }
 }
 
-log("\(dryRun ? "DRY RUN — " : "")\(source.title) (\(source.source.title)) → \(target.title) (\(target.source.title)): \(triggers.count) day(s) with \"\(cfg.triggerTitle ?? "S")\"")
+log("\(dryRun ? "DRY RUN — " : "")\(source.title) (\(source.source.title)) → \(target.title) (\(target.source.title)): \(triggers.count) day(s) with \"\(cfg.triggerTitle ?? Default.triggerTitle)\"")
 
 var created = 0, updated = 0, removed = 0
 
@@ -474,7 +538,7 @@ do {
             removed += 1
         }
         for (day, d) in stale.sorted(by: { $0.key < $1.key }) {
-            let why = noCoverageDays.contains(day) ? "no \(cfg.coverageTitle ?? "coverage")" : "no \(cfg.triggerTitle ?? "S")"
+            let why = noCoverageDays.contains(day) ? "no \(cfg.coverageTitle ?? Default.coverageTitle)" : "no \(cfg.triggerTitle ?? Default.triggerTitle)"
             if isMarkedMissing(d.url) {
                 log("remove  \(day)  \(describe(d))  (\(why))", .red)
                 outcome[day] = ("\(why) — \(did("removed", "remove")) \(eventTitle)", .red)
@@ -511,8 +575,8 @@ while day < windowEnd {
     let key = dayFormatter.string(from: day)
     let (text, color) = outcome[key]
         ?? (offDays.contains(key) ? ("off", .cyan)
-            : noCoverageDays.contains(key) ? ("\(cfg.triggerTitle ?? "S") but no \(cfg.coverageTitle ?? "coverage") yet — not added", .yellow)
-            : ("no \(cfg.triggerTitle ?? "S")", .dim))
+            : noCoverageDays.contains(key) ? ("\(cfg.triggerTitle ?? Default.triggerTitle) but no \(cfg.coverageTitle ?? Default.coverageTitle) yet — not added", .yellow)
+            : ("no \(cfg.triggerTitle ?? Default.triggerTitle)", .dim))
     let label = "\(weekday.string(from: day)) \(key)"
     print("  \(cal.isDateInToday(day) ? paint(label, .bold) : label)  \(paint(text, color))")
     day = cal.date(byAdding: .day, value: 1, to: day)!

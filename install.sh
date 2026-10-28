@@ -3,6 +3,7 @@
 # ./install.sh schedule     sync once every "scheduleEveryDays" (config.json, default 1).
 #                           launchd checks hourly; outlook-sync skips if it already synced.
 # ./install.sh unschedule   stop the scheduled job
+# ./install.sh reset-config replace config.json with config.example.json (old one is backed up)
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -70,6 +71,17 @@ EOF
     rm -f "$AGENT"
     echo "Unscheduled."
     ;;
+  reset-config)
+    mkdir -p "$CONF_DIR"
+    if [ -f "$CONFIG" ]; then
+      BACKUP="$CONFIG.backup-$(date +%Y%m%d-%H%M%S)"
+      cp "$CONFIG" "$BACKUP"
+      echo "Backed up your old config to $BACKUP"
+    fi
+    cp config.example.json "$CONFIG"
+    echo "Reset $CONFIG from config.example.json."
+    echo "Check the calendar names with: $BIN --list-calendars"
+    ;;
   *)
-    echo "Usage: $0 build | schedule | unschedule"; exit 1 ;;
+    echo "Usage: $0 build | schedule | unschedule | reset-config"; exit 1 ;;
 esac

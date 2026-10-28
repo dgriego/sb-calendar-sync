@@ -117,5 +117,10 @@ scheduled log is plain text, and setting `NO_COLOR=1` turns colors off.
 - **"No calendar access":** System Settings → Privacy & Security → Calendars →
   turn on outlook-sync (or Terminal, if you ran it from Terminal). If you rebuild
   the binary, you may need to allow it again.
+- **Start over with a fresh config** (e.g. on a new Mac, or after an update
+  adds settings): `./install.sh reset-config`. It copies `config.example.json`
+  over your config and saves the old one as
+  `config.json.backup-<date-time>` next to it. Then check the calendar names
+  again with `--list-calendars`.
 - **Stop syncing:** `./install.sh unschedule`. Events already created stay in
   your Work calendar until you delete them.
